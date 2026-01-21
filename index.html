@@ -2,7 +2,7 @@
 <html lang="fr">
   <head>
     <meta charset="UTF-8" />
-    <title>Tableau blanc magique - HTML standalone</title>
+    <title>Tableau blanc magique — Stylet + doigt (standalone)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
     <!-- React + ReactDOM depuis CDN -->
@@ -175,12 +175,21 @@
         border: 1px solid #e6dcc8;
         background: #f8f0df;
         min-height: 70vh;
+
+        /* IMPORTANT pour stylet/tactile : évite scroll/zoom du navigateur sur la zone */
+        touch-action: none;
       }
 
       .canvas-base,
       .canvas-overlay {
         position: absolute;
         inset: 0;
+      }
+
+      .canvas-base {
+        /* IMPORTANT pour stylet/tactile */
+        touch-action: none;
+        -ms-touch-action: none;
       }
 
       .canvas-overlay {
@@ -200,22 +209,23 @@
       const { useState, useEffect, useRef } = React;
 
       function uid() {
-        return (
-          Math.random().toString(36).slice(2) +
-          Date.now().toString(36)
-        );
+        return Math.random().toString(36).slice(2) + Date.now().toString(36);
+      }
+
+      function clamp(n, a, b) {
+        return Math.max(a, Math.min(b, n));
       }
 
       function TableauBlancMagique() {
         // Outils & style
-        const [tool, setTool] = useState("hand");
+        const [tool, setTool] = useState("hand"); // hand | move | pen | highlighter | eraser | line | rect | ellipse | arrow
         const [color, setColor] = useState("#5b4636");
         const [size, setSize] = useState(6);
 
         // Fond par page
         const [pageBgs, setPageBgs] = useState([]); // "plain" | "grid" | "lined"
 
-        // Document multi-pages
+        // Document multi-pages (PDF ou pages vierges)
         const [pages, setPages] = useState(null); // array of canvases
         const [pageIndex, setPageIndex] = useState(0);
         const [pageAngles, setPageAngles] = useState([]); // angle par page (radians)
@@ -226,10 +236,11 @@
         const [shapes, setShapes] = useState([]);
         const [overlays, setOverlays] = useState([]); // images + tables
 
-        // Dessin en cours
+        // Dessin en cours (1 seul pointeur à la fois pour le dessin)
         const [isDrawing, setIsDrawing] = useState(false);
         const [currentPoints, setCurrentPoints] = useState([]);
         const [shapeStart, setShapeStart] = useState(null);
+        const activeDrawPointerId = useRef(null);
 
         // Sélection & déplacement/redimensionnement d’objets
         const [activeOverlayId, setActiveOverlayId] = useState(null);
@@ -248,8 +259,11 @@
         const overlayRef = useRef(null);
         const containerRef = useRef(null);
         const viewRef = useRef({ tx: 0, ty: 0, scale: 1 });
+
+        // Pan (hand tool)
         const panningRef = useRef({
           active: false,
+          pointerId: null,
           startX: 0,
           startY: 0,
           startTx: 0,
@@ -262,6 +276,9 @@
 
         // Edition cellule table
         const [editingCell, setEditingCell] = useState(null);
+
+        // Double-tap (tactile/stylet) pour édition table
+        const lastTapRef = useRef({ t: 0, x: 0, y: 0 });
 
         const currentBg = pageBgs[pageIndex] || "plain";
 
@@ -308,12 +325,15 @@
         }
 
         // --- Coordonnées ---
-        function getScreenPos(e) {
+        function getScreenPosFromPointer(e) {
           const rect = canvasRef.current.getBoundingClientRect();
           const dpr = window.devicePixelRatio || 1;
           return {
             x: (e.clientX - rect.left) * dpr,
             y: (e.clientY - rect.top) * dpr,
+            pressure: e.pressure != null ? e.pressure : 0.5,
+            pointerType: e.pointerType || "mouse",
+            pointerId: e.pointerId,
           };
         }
 
@@ -342,14 +362,19 @@
           };
         }
 
-        // --- Zoom / pan ---
+        // --- Zoom (CTRL+wheel) / boutons ---
         function onWheel(e) {
           if (!(e.ctrlKey || e.metaKey)) return;
           e.preventDefault();
           const factor = Math.exp(-e.deltaY * 0.001);
           const prev = viewRef.current.scale;
-          const next = Math.min(4, Math.max(0.2, prev * factor));
-          const mouse = getScreenPos(e);
+          const next = clamp(prev * factor, 0.2, 4);
+          const mouse = (() => {
+            const rect = canvasRef.current.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            return { x: (e.clientX - rect.left) * dpr, y: (e.clientY - rect.top) * dpr };
+          })();
+
           const { tx, ty, scale } = viewRef.current;
           const wx = (mouse.x - tx) / scale;
           const wy = (mouse.y - ty) / scale;
@@ -359,29 +384,59 @@
           drawAll();
         }
 
-        function beginPan(p) {
+        function zoomBy(factor) {
+          if (!canvasRef.current) return;
+          const rect = canvasRef.current.getBoundingClientRect();
+          const dpr = window.devicePixelRatio || 1;
+          const center = { x: (rect.width * dpr) / 2, y: (rect.height * dpr) / 2 };
+
+          const prev = viewRef.current.scale;
+          const next = clamp(prev * factor, 0.2, 4);
+
+          const { tx, ty, scale } = viewRef.current;
+          const wx = (center.x - tx) / scale;
+          const wy = (center.y - ty) / scale;
+          viewRef.current.scale = next;
+          viewRef.current.tx = center.x - wx * next;
+          viewRef.current.ty = center.y - wy * next;
+          drawAll();
+        }
+
+        function resetView() {
+          viewRef.current = { tx: 0, ty: 0, scale: 1 };
+          drawAll();
+        }
+
+        // --- Pan (hand tool) via Pointer Events ---
+        function beginPan(pS) {
           const v = viewRef.current;
           panningRef.current = {
             active: true,
-            startX: p.x,
-            startY: p.y,
+            pointerId: pS.pointerId,
+            startX: pS.x,
+            startY: pS.y,
             startTx: v.tx,
             startTy: v.ty,
           };
         }
 
-        function updatePan(p) {
+        function updatePan(pS) {
           const pan = panningRef.current;
           if (!pan.active) return;
-          const dx = p.x - pan.startX;
-          const dy = p.y - pan.startY;
+          if (pan.pointerId !== pS.pointerId) return;
+          const dx = pS.x - pan.startX;
+          const dy = pS.y - pan.startY;
           viewRef.current.tx = pan.startTx + dx;
           viewRef.current.ty = pan.startTy + dy;
           drawAll();
         }
 
-        function endPan() {
+        function endPan(pointerId) {
+          const pan = panningRef.current;
+          if (!pan.active) return;
+          if (pointerId != null && pan.pointerId !== pointerId) return;
           panningRef.current.active = false;
+          panningRef.current.pointerId = null;
         }
 
         // --- Hit test overlays (image / table) ---
@@ -395,8 +450,7 @@
 
               const handleSize = 14;
               const near = (px, py) =>
-                Math.abs(lx - px) <= handleSize &&
-                Math.abs(ly - py) <= handleSize;
+                Math.abs(lx - px) <= handleSize && Math.abs(ly - py) <= handleSize;
 
               if (near(0, 0)) return { id: t.id, part: "table-resize-tl" };
               if (near(t.w, 0)) return { id: t.id, part: "table-resize-tr" };
@@ -460,8 +514,19 @@
           }
         }
 
+        // Taille dynamique au stylet (pression)
+        function computeSize(baseSize, pressure, pointerType) {
+          if (pointerType === "pen") {
+            const p = clamp(pressure || 0.5, 0.1, 1);
+            return Math.max(1, baseSize * (0.3 + 1.2 * p));
+          }
+          // doigt/souris = taille fixe
+          return baseSize;
+        }
+
         function drawStroke(ctx, s) {
           ctx.save();
+
           if (s.tool === "eraser") {
             ctx.globalCompositeOperation = "destination-out";
             ctx.strokeStyle = "rgba(0,0,0,1)";
@@ -473,16 +538,27 @@
             ctx.globalAlpha = 1;
             ctx.strokeStyle = s.color;
           }
+
           ctx.lineCap = "round";
           ctx.lineJoin = "round";
-          ctx.lineWidth = s.size;
-          ctx.beginPath();
-          for (let i = 0; i < s.points.length; i++) {
-            const p = s.points[i];
-            if (i === 0) ctx.moveTo(p.x, p.y);
-            else ctx.lineTo(p.x, p.y);
+
+          const pts = s.points || [];
+          if (pts.length < 2) {
+            ctx.restore();
+            return;
           }
-          ctx.stroke();
+
+          // segment par segment (permet la pression)
+          for (let i = 1; i < pts.length; i++) {
+            const a = pts[i - 1];
+            const b = pts[i];
+            ctx.lineWidth = computeSize(s.size, b.pressure, b.pointerType);
+            ctx.beginPath();
+            ctx.moveTo(a.x, a.y);
+            ctx.lineTo(b.x, b.y);
+            ctx.stroke();
+          }
+
           ctx.restore();
         }
 
@@ -539,10 +615,6 @@
             ctx.stroke();
           } else if (sh.kind === "arrow") {
             drawArrow(ctx, sh.a, sh.b, sh.size, sh.color);
-          } else if (sh.kind === "circle") {
-            ctx.beginPath();
-            ctx.arc(sh.c.x, sh.c.y, sh.r, 0, Math.PI * 2);
-            ctx.stroke();
           }
           ctx.restore();
         }
@@ -637,10 +709,8 @@
           ctx.translate(tx, ty);
           ctx.scale(scale, scale);
 
-          const page =
-            pages && pages.length > 0 ? pages[pageIndex] : null;
-          const angle =
-            pageAngles[pageIndex] !== undefined ? pageAngles[pageIndex] : 0;
+          const page = pages && pages.length > 0 ? pages[pageIndex] : null;
+          const angle = pageAngles[pageIndex] !== undefined ? pageAngles[pageIndex] : 0;
 
           // Page (PDF / image) avec rotation
           if (page) {
@@ -653,7 +723,7 @@
             ctx.restore();
           }
 
-          // Fond ligné / quadrillé sur toute la surface visible
+          // Fond ligné / quadrillé sur la surface visible
           const worldW = canvas.width / scale;
           const worldH = canvas.height / scale;
           drawPattern(ctx, worldW, worldH, currentBg);
@@ -665,22 +735,14 @@
             currentPoints.length > 1 &&
             (tool === "pen" || tool === "highlighter" || tool === "eraser")
           ) {
-            drawStroke(ctx, {
-              tool,
-              color,
-              size,
-              points: currentPoints,
-            });
+            drawStroke(ctx, { tool, color, size, points: currentPoints });
           }
 
           // shapes
           shapes.forEach((sh) => drawShape(ctx, sh));
           if (
             shapeStart &&
-            (tool === "line" ||
-              tool === "rect" ||
-              tool === "ellipse" ||
-              tool === "arrow")
+            (tool === "line" || tool === "rect" || tool === "ellipse" || tool === "arrow")
           ) {
             const mouse = lastPointWorld.current;
             if (mouse) {
@@ -692,7 +754,7 @@
             }
           }
 
-          // overlays
+          // overlays (sur overlay canvas)
           octx.save();
           octx.translate(tx, ty);
           octx.scale(scale, scale);
@@ -702,190 +764,8 @@
           ctx.restore();
         }
 
-        // --- souris ---
-        function onDown(e) {
-          const pS = getScreenPos(e);
-          const pW = screenToWorld(pS);
-          lastPointScreen.current = pS;
-          lastPointWorld.current = pW;
-
-          if (tool === "hand") {
-            beginPan(pS);
-            return;
-          }
-
-          if (tool === "move") {
-            const hit = hitTestOverlayWorld(pW.x, pW.y, overlays);
-            resizeRef.current = null;
-
-            if (hit) {
-              setActiveOverlayId(hit.id);
-              setActivePart(hit.part);
-              const item = overlays.find((o) => o.id === hit.id);
-              if (!item) return;
-
-              if (hit.part === "body") {
-                setDragOffset({
-                  dx: pW.x - item.x,
-                  dy: pW.y - item.y,
-                });
-              } else if (hit.part.startsWith("table-resize")) {
-                const t = item;
-                const anchor = hit.part.slice("table-resize-".length); // tl/tr/bl/br
-                resizeRef.current = {
-                  startX: pW.x,
-                  startY: pW.y,
-                  startW: t.w,
-                  startH: t.h,
-                  startPx: t.x,
-                  startPy: t.y,
-                  anchor,
-                };
-              }
-            } else {
-              setActiveOverlayId(null);
-              setActivePart(null);
-            }
-            return;
-          }
-
-          if (tool === "pen" || tool === "highlighter" || tool === "eraser") {
-            pushHistory();
-            setIsDrawing(true);
-            setCurrentPoints([pW]);
-          } else if (
-            tool === "line" ||
-            tool === "rect" ||
-            tool === "ellipse" ||
-            tool === "arrow"
-          ) {
-            pushHistory();
-            setShapeStart(pW);
-          }
-        }
-
-        function onMove(e) {
-          const pS = getScreenPos(e);
-          const pW = screenToWorld(pS);
-          lastPointScreen.current = pS;
-          lastPointWorld.current = pW;
-
-          if (tool === "hand") {
-            updatePan(pS);
-            return;
-          }
-
-          if (tool === "move" && activeOverlayId) {
-            setOverlays((prev) =>
-              prev.map((o) => {
-                if (o.id !== activeOverlayId) return o;
-
-                if (activePart === "body") {
-                  return {
-                    ...o,
-                    x: pW.x - dragOffset.dx,
-                    y: pW.y - dragOffset.dy,
-                  };
-                }
-
-                if (o.type === "table" && activePart?.startsWith("table-resize")) {
-                  const info = resizeRef.current;
-                  if (!info) return o;
-                  const dx = pW.x - info.startX;
-                  const dy = pW.y - info.startY;
-                  let newW = info.startW;
-                  let newH = info.startH;
-                  let newX = info.startPx;
-                  let newY = info.startPy;
-                  const minSize = 40;
-
-                  switch (info.anchor) {
-                    case "br":
-                      newW = Math.max(minSize, info.startW + dx);
-                      newH = Math.max(minSize, info.startH + dy);
-                      break;
-                    case "tr":
-                      newW = Math.max(minSize, info.startW + dx);
-                      newH = Math.max(minSize, info.startH - dy);
-                      newY = info.startPy + (info.startH - newH);
-                      break;
-                    case "bl":
-                      newW = Math.max(minSize, info.startW - dx);
-                      newH = Math.max(minSize, info.startH + dy);
-                      newX = info.startPx + (info.startW - newW);
-                      break;
-                    case "tl":
-                      newW = Math.max(minSize, info.startW - dx);
-                      newH = Math.max(minSize, info.startH - dy);
-                      newX = info.startPx + (info.startW - newW);
-                      newY = info.startPy + (info.startH - newH);
-                      break;
-                  }
-
-                  const cellW = newW / o.cols;
-                  const cellH = newH / o.rows;
-                  return {
-                    ...o,
-                    x: newX,
-                    y: newY,
-                    w: newW,
-                    h: newH,
-                    cellW,
-                    cellH,
-                  };
-                }
-
-                return o;
-              })
-            );
-            drawAll();
-            return;
-          }
-
-          if (isDrawing) {
-            setCurrentPoints((prev) => [...prev, pW]);
-            drawAll();
-          } else if (shapeStart) {
-            drawAll();
-          }
-        }
-
-        function onUp() {
-          if (tool === "hand") {
-            endPan();
-            return;
-          }
-
-          if (tool === "pen" || tool === "highlighter" || tool === "eraser") {
-            if (isDrawing && currentPoints.length > 1) {
-              const s = { tool, color, size, points: currentPoints };
-              setStrokes((prev) => [...prev, s]);
-            }
-            setIsDrawing(false);
-            setCurrentPoints([]);
-          } else if (shapeStart && lastPointWorld.current) {
-            const a = shapeStart;
-            const b = lastPointWorld.current;
-            const sh =
-              tool === "ellipse"
-                ? { kind: "ellipse", color, size, a, b }
-                : { kind: tool, color, size, a, b };
-            setShapes((prev) => [...prev, sh]);
-            setShapeStart(null);
-          }
-
-          setActiveOverlayId(null);
-          setActivePart(null);
-          resizeRef.current = null;
-          drawAll();
-          saveCurrentPage();
-        }
-
-        // double-clic : éditer cellule de tableau
-        function onDoubleClick(e) {
-          const pS = getScreenPos(e);
-          const pW = screenToWorld(pS);
-
+        // --- Table: ouverture éditeur cellule (double-clic / double-tap) ---
+        function openTableCellEditorAtWorld(pW) {
           for (let i = overlays.length - 1; i >= 0; i--) {
             const ov = overlays[i];
             if (ov.type !== "table") continue;
@@ -922,8 +802,17 @@
               width: cssBR.x - cssTL.x,
               height: cssBR.y - cssTL.y,
             });
-            return;
+            return true;
           }
+          return false;
+        }
+
+        function onDoubleClick(e) {
+          const rect = canvasRef.current.getBoundingClientRect();
+          const dpr = window.devicePixelRatio || 1;
+          const pS = { x: (e.clientX - rect.left) * dpr, y: (e.clientY - rect.top) * dpr };
+          const pW = screenToWorld(pS);
+          openTableCellEditorAtWorld(pW);
         }
 
         function commitEditingCell(cancel = false) {
@@ -1019,9 +908,7 @@
         async function ensurePdfJs() {
           const g = window;
           if (g.pdfjsLib) return g.pdfjsLib;
-          await loadScript(
-            "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.9.179/pdf.min.js"
-          );
+          await loadScript("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.9.179/pdf.min.js");
           if (g.pdfjsLib) {
             g.pdfjsLib.GlobalWorkerOptions.workerSrc =
               "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.9.179/pdf.worker.min.js";
@@ -1062,11 +949,7 @@
           setPages(newPages);
           setPageAngles(newPages.map(() => 0));
           setPageBgs(newPages.map(() => "plain"));
-          pagesDataRef.current = newPages.map(() => ({
-            strokes: [],
-            shapes: [],
-            overlays: [],
-          }));
+          pagesDataRef.current = newPages.map(() => ({ strokes: [], shapes: [], overlays: [] }));
           setPageIndex(0);
           restoreState({ strokes: [], shapes: [], overlays: [] });
           fitToPage(newPages[0], 0);
@@ -1094,11 +977,7 @@
             setPages(newPages);
             setPageAngles(newPages.map(() => 0));
             setPageBgs(newPages.map(() => "plain"));
-            pagesDataRef.current = newPages.map(() => ({
-              strokes: [],
-              shapes: [],
-              overlays: [],
-            }));
+            pagesDataRef.current = newPages.map(() => ({ strokes: [], shapes: [], overlays: [] }));
             setPageIndex(0);
             restoreState({ strokes: [], shapes: [], overlays: [] });
             fitToPage(newPages[0], 0);
@@ -1110,11 +989,23 @@
         // --- Pages ---
         function makeBlankCanvas() {
           const c = document.createElement("canvas");
-          const baseW = 1200;
-          const baseH = 800;
-          c.width = baseW;
-          c.height = baseH;
+          c.width = 1200;
+          c.height = 800;
           return c;
+        }
+
+        function saveCurrentPage() {
+          if (!pages) return;
+          pagesDataRef.current[pageIndex] = cloneState();
+        }
+
+        function clonePage(i) {
+          const st = pagesDataRef.current[i] || { strokes: [], shapes: [], overlays: [] };
+          return {
+            strokes: JSON.parse(JSON.stringify(st.strokes)),
+            shapes: JSON.parse(JSON.stringify(st.shapes)),
+            overlays: JSON.parse(JSON.stringify(st.overlays)),
+          };
         }
 
         function addBlankPage() {
@@ -1135,33 +1026,11 @@
             setPages(newPages);
             setPageAngles((prev) => [...prev, 0]);
             setPageBgs((prev) => [...prev, "plain"]);
-            pagesDataRef.current = [
-              ...pagesDataRef.current,
-              { strokes: [], shapes: [], overlays: [] },
-            ];
+            pagesDataRef.current = [...pagesDataRef.current, { strokes: [], shapes: [], overlays: [] }];
             setPageIndex(newPages.length - 1);
             restoreState({ strokes: [], shapes: [], overlays: [] });
             fitToPage(c, 0);
           }
-        }
-
-        function clonePage(i) {
-          const st =
-            pagesDataRef.current[i] || {
-              strokes: [],
-              shapes: [],
-              overlays: [],
-            };
-          return {
-            strokes: JSON.parse(JSON.stringify(st.strokes)),
-            shapes: JSON.parse(JSON.stringify(st.shapes)),
-            overlays: JSON.parse(JSON.stringify(st.overlays)),
-          };
-        }
-
-        function saveCurrentPage() {
-          if (!pages) return;
-          pagesDataRef.current[pageIndex] = cloneState();
         }
 
         function goPrev() {
@@ -1170,8 +1039,7 @@
           const i = pageIndex - 1;
           setPageIndex(i);
           restoreState(clonePage(i));
-          const ang = pageAngles[i] || 0;
-          fitToPage(pages[i], ang);
+          fitToPage(pages[i], pageAngles[i] || 0);
         }
 
         function goNext() {
@@ -1180,17 +1048,16 @@
           const i = pageIndex + 1;
           setPageIndex(i);
           restoreState(clonePage(i));
-          const ang = pageAngles[i] || 0;
-          fitToPage(pages[i], ang);
+          fitToPage(pages[i], pageAngles[i] || 0);
         }
 
         function rotatePageDegrees(deltaDeg) {
           if (!pages || pages.length === 0) return;
           const delta = (deltaDeg * Math.PI) / 180;
+
           setPageAngles((prev) => {
             const arr = prev ? prev.slice() : [];
-            const len = pages.length;
-            while (arr.length < len) arr.push(0);
+            while (arr.length < pages.length) arr.push(0);
             const cur = arr[pageIndex] || 0;
             const twoPI = Math.PI * 2;
             let ang = cur + delta;
@@ -1198,6 +1065,7 @@
             arr[pageIndex] = ang;
             return arr;
           });
+
           const page = pages[pageIndex];
           if (page) {
             const cur = pageAngles[pageIndex] || 0;
@@ -1206,6 +1074,36 @@
             newAngle = ((newAngle % twoPI) + twoPI) % twoPI;
             fitToPage(page, newAngle);
           }
+        }
+
+        function fitToPage(pageCnv, angle) {
+          if (!canvasRef.current) return;
+          const c = canvasRef.current;
+          const vw = c.width;
+          const vh = c.height;
+          const pw = pageCnv.width;
+          const ph = pageCnv.height;
+
+          const a = angle || 0;
+          const k = Math.round(a / (Math.PI / 2)) % 2; // 0 pour 0/180°, 1 pour 90/270°
+          const effW = k === 0 ? pw : ph;
+          const effH = k === 0 ? ph : pw;
+
+          const s = Math.min(vw / effW, vh / effH) * 0.95;
+          viewRef.current.scale = s;
+          viewRef.current.tx = (vw - effW * s) / 2;
+          viewRef.current.ty = (vh - effH * s) / 2;
+          drawAll();
+        }
+
+        function deleteActive() {
+          if (!activeOverlayId) return;
+          pushHistory();
+          setOverlays((prev) => prev.filter((o) => o.id !== activeOverlayId));
+          setActiveOverlayId(null);
+          setActivePart(null);
+          drawAll();
+          saveCurrentPage();
         }
 
         // --- Export PNG (page courante) ---
@@ -1218,10 +1116,8 @@
           base.height = c.height;
           const bctx = base.getContext("2d");
 
-          const page =
-            pages && pages.length > 0 ? pages[pageIndex] : null;
-          const angle =
-            pageAngles[pageIndex] !== undefined ? pageAngles[pageIndex] : 0;
+          const page = pages && pages.length > 0 ? pages[pageIndex] : null;
+          const angle = pageAngles[pageIndex] !== undefined ? pageAngles[pageIndex] : 0;
           const bgForPage = currentBg;
 
           drawBase(bctx, base.width, base.height);
@@ -1248,14 +1144,14 @@
           shapes.forEach((sh) => drawShape(bctx, sh));
           bctx.restore();
 
+          // overlays
           const tmp = document.createElement("canvas");
           tmp.width = o.width;
           tmp.height = o.height;
           const tctx = tmp.getContext("2d");
           tctx.save();
-          const { tx: tx2, ty: ty2, scale: sc2 } = viewRef.current;
-          tctx.translate(tx2, ty2);
-          tctx.scale(sc2, sc2);
+          tctx.translate(viewRef.current.tx, viewRef.current.ty);
+          tctx.scale(viewRef.current.scale, viewRef.current.scale);
           overlays.forEach((it) => drawOverlay(tctx, it));
           tctx.restore();
           bctx.drawImage(tmp, 0, 0);
@@ -1269,9 +1165,7 @@
 
         // --- Export PDF (pages choisies) ---
         function parsePageSelection(str, total) {
-          if (!str || !str.trim()) {
-            return Array.from({ length: total }, (_, i) => i);
-          }
+          if (!str || !str.trim()) return Array.from({ length: total }, (_, i) => i);
           const result = new Set();
           const parts = str.split(",");
           for (const part of parts) {
@@ -1285,9 +1179,7 @@
               for (let i = start; i <= end; i++) result.add(i - 1);
             } else {
               const n = parseInt(p, 10);
-              if (!isNaN(n) && n >= 1 && n <= total) {
-                result.add(n - 1);
-              }
+              if (!isNaN(n) && n >= 1 && n <= total) result.add(n - 1);
             }
           }
           return Array.from(result).sort((a, b) => a - b);
@@ -1296,10 +1188,8 @@
         function renderPageToCanvas(pageIdx, targetCanvas) {
           const ctx = targetCanvas.getContext("2d");
           const state = clonePage(pageIdx);
-          const page =
-            pages && pages.length > 0 ? pages[pageIdx] : null;
-          const angle =
-            pageAngles[pageIdx] !== undefined ? pageAngles[pageIdx] : 0;
+          const page = pages && pages.length > 0 ? pages[pageIdx] : null;
+          const angle = pageAngles[pageIdx] !== undefined ? pageAngles[pageIdx] : 0;
           const bgForPage = pageBgs[pageIdx] || "plain";
 
           ctx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
@@ -1353,6 +1243,7 @@
             const tmp = document.createElement("canvas");
             tmp.width = pageCanvas.width;
             tmp.height = pageCanvas.height;
+
             renderPageToCanvas(idx, tmp);
             const imgData = tmp.toDataURL("image/jpeg", 0.95);
 
@@ -1373,65 +1264,241 @@
             const y = (pageHeight - drawHeight) / 2;
 
             doc.addImage(imgData, "JPEG", x, y, drawWidth, drawHeight);
-            if (idxPos < indices.length - 1) {
-              doc.addPage();
-            }
+            if (idxPos < indices.length - 1) doc.addPage();
           });
 
           doc.save("tableau_blanc_pages.pdf");
         }
 
-        // --- Vue ---
-        function zoomBy(factor) {
+        // --- Pointer Events (stylet + doigt + souris) ---
+        function onPointerDown(e) {
+          // évite scroll/zoom/gestures du navigateur sur mobile
+          e.preventDefault();
+
           if (!canvasRef.current) return;
-          const cont = canvasRef.current;
-          const rect = cont.getBoundingClientRect();
-          const center = {
-            x: (rect.width * (window.devicePixelRatio || 1)) / 2,
-            y: (rect.height * (window.devicePixelRatio || 1)) / 2,
-          };
-          const prev = viewRef.current.scale;
-          const next = Math.min(4, Math.max(0.2, prev * factor));
-          const { tx, ty, scale } = viewRef.current;
-          const wx = (center.x - tx) / scale;
-          const wy = (center.y - ty) / scale;
-          viewRef.current.scale = next;
-          viewRef.current.tx = center.x - wx * next;
-          viewRef.current.ty = center.y - wy * next;
-          drawAll();
+          try {
+            canvasRef.current.setPointerCapture(e.pointerId);
+          } catch {}
+
+          const pS = getScreenPosFromPointer(e);
+          const pW = screenToWorld(pS);
+
+          lastPointScreen.current = pS;
+          lastPointWorld.current = pW;
+
+          // Si on édite un tableau, ignorer les interactions de dessin
+          if (editingCell) return;
+
+          if (tool === "hand") {
+            beginPan(pS);
+            return;
+          }
+
+          if (tool === "move") {
+            const hit = hitTestOverlayWorld(pW.x, pW.y, overlays);
+            resizeRef.current = null;
+
+            if (hit) {
+              setActiveOverlayId(hit.id);
+              setActivePart(hit.part);
+              const item = overlays.find((o) => o.id === hit.id);
+              if (!item) return;
+
+              if (hit.part === "body") {
+                setDragOffset({ dx: pW.x - item.x, dy: pW.y - item.y });
+              } else if (hit.part.startsWith("table-resize")) {
+                const t = item;
+                const anchor = hit.part.slice("table-resize-".length); // tl/tr/bl/br
+                resizeRef.current = {
+                  startX: pW.x,
+                  startY: pW.y,
+                  startW: t.w,
+                  startH: t.h,
+                  startPx: t.x,
+                  startPy: t.y,
+                  anchor,
+                };
+              }
+            } else {
+              setActiveOverlayId(null);
+              setActivePart(null);
+            }
+            return;
+          }
+
+          // Dessin / formes (doigt + stylet + souris)
+          if (tool === "pen" || tool === "highlighter" || tool === "eraser") {
+            // un seul pointeur dessine (si multi-touch, on ignore les autres)
+            if (activeDrawPointerId.current != null) return;
+            activeDrawPointerId.current = e.pointerId;
+
+            pushHistory();
+            setIsDrawing(true);
+            setCurrentPoints([
+              {
+                x: pW.x,
+                y: pW.y,
+                pressure: pS.pressure,
+                pointerType: pS.pointerType,
+              },
+            ]);
+          } else if (tool === "line" || tool === "rect" || tool === "ellipse" || tool === "arrow") {
+            pushHistory();
+            setShapeStart(pW);
+          }
         }
 
-        function resetView() {
-          viewRef.current = { tx: 0, ty: 0, scale: 1 };
-          drawAll();
+        function onPointerMove(e) {
+          e.preventDefault();
+          const pS = getScreenPosFromPointer(e);
+          const pW = screenToWorld(pS);
+
+          lastPointScreen.current = pS;
+          lastPointWorld.current = pW;
+
+          if (editingCell) return;
+
+          if (tool === "hand") {
+            updatePan(pS);
+            return;
+          }
+
+          if (tool === "move" && activeOverlayId) {
+            setOverlays((prev) =>
+              prev.map((o) => {
+                if (o.id !== activeOverlayId) return o;
+
+                if (activePart === "body") {
+                  return { ...o, x: pW.x - dragOffset.dx, y: pW.y - dragOffset.dy };
+                }
+
+                if (o.type === "table" && activePart?.startsWith("table-resize")) {
+                  const info = resizeRef.current;
+                  if (!info) return o;
+                  const dx = pW.x - info.startX;
+                  const dy = pW.y - info.startY;
+
+                  let newW = info.startW;
+                  let newH = info.startH;
+                  let newX = info.startPx;
+                  let newY = info.startPy;
+                  const minSize = 40;
+
+                  switch (info.anchor) {
+                    case "br":
+                      newW = Math.max(minSize, info.startW + dx);
+                      newH = Math.max(minSize, info.startH + dy);
+                      break;
+                    case "tr":
+                      newW = Math.max(minSize, info.startW + dx);
+                      newH = Math.max(minSize, info.startH - dy);
+                      newY = info.startPy + (info.startH - newH);
+                      break;
+                    case "bl":
+                      newW = Math.max(minSize, info.startW - dx);
+                      newH = Math.max(minSize, info.startH + dy);
+                      newX = info.startPx + (info.startW - newW);
+                      break;
+                    case "tl":
+                      newW = Math.max(minSize, info.startW - dx);
+                      newH = Math.max(minSize, info.startH - dy);
+                      newX = info.startPx + (info.startW - newW);
+                      newY = info.startPy + (info.startH - newH);
+                      break;
+                  }
+
+                  return { ...o, x: newX, y: newY, w: newW, h: newH, cellW: newW / o.cols, cellH: newH / o.rows };
+                }
+
+                return o;
+              })
+            );
+            drawAll();
+            return;
+          }
+
+          if (isDrawing) {
+            if (activeDrawPointerId.current !== e.pointerId) return;
+            setCurrentPoints((prev) => [
+              ...prev,
+              { x: pW.x, y: pW.y, pressure: pS.pressure, pointerType: pS.pointerType },
+            ]);
+            drawAll();
+          } else if (shapeStart) {
+            drawAll();
+          }
         }
 
-        function fitToPage(pageCnv, angle) {
-          if (!canvasRef.current) return;
-          const c = canvasRef.current;
-          const vw = c.width;
-          const vh = c.height;
-          const pw = pageCnv.width;
-          const ph = pageCnv.height;
+        function finishPointerInteraction(pointerId) {
+          // Fin pan
+          if (tool === "hand") {
+            endPan(pointerId);
+            return;
+          }
 
-          const a = angle || 0;
-          const k = Math.round(a / (Math.PI / 2)) % 2; // 0 pour 0/180°, 1 pour 90/270°
-          const effW = k === 0 ? pw : ph;
-          const effH = k === 0 ? ph : pw;
+          // Fin dessin
+          if (tool === "pen" || tool === "highlighter" || tool === "eraser") {
+            if (activeDrawPointerId.current !== pointerId) return;
 
-          const s = Math.min(vw / effW, vh / effH) * 0.95;
-          viewRef.current.scale = s;
-          viewRef.current.tx = (vw - effW * s) / 2;
-          viewRef.current.ty = (vh - effH * s) / 2;
-          drawAll();
-        }
+            if (isDrawing && currentPoints.length > 1) {
+              const s = { tool, color, size, points: currentPoints };
+              setStrokes((prev) => [...prev, s]);
+            }
+            setIsDrawing(false);
+            setCurrentPoints([]);
+            activeDrawPointerId.current = null;
+          } else if (shapeStart && lastPointWorld.current) {
+            const a = shapeStart;
+            const b = lastPointWorld.current;
+            const sh = tool === "ellipse" ? { kind: "ellipse", color, size, a, b } : { kind: tool, color, size, a, b };
+            setShapes((prev) => [...prev, sh]);
+            setShapeStart(null);
+          }
 
-        function deleteActive() {
-          if (!activeOverlayId) return;
-          setOverlays((prev) => prev.filter((o) => o.id !== activeOverlayId));
+          // Fin move
           setActiveOverlayId(null);
           setActivePart(null);
+          resizeRef.current = null;
+
           drawAll();
+          saveCurrentPage();
+        }
+
+        function onPointerUp(e) {
+          e.preventDefault();
+
+          // Double-tap (tactile/stylet) pour éditer tableau
+          // (souris = double-clic natif)
+          if (e.pointerType === "touch" || e.pointerType === "pen") {
+            const now = Date.now();
+            const pS = getScreenPosFromPointer(e);
+            const dt = now - lastTapRef.current.t;
+            const dx = pS.x - lastTapRef.current.x;
+            const dy = pS.y - lastTapRef.current.y;
+            const dist = Math.hypot(dx, dy);
+
+            if (dt < 350 && dist < 25) {
+              const pW = screenToWorld(pS);
+              openTableCellEditorAtWorld(pW);
+              lastTapRef.current = { t: 0, x: 0, y: 0 };
+              finishPointerInteraction(e.pointerId);
+              return;
+            } else {
+              lastTapRef.current = { t: now, x: pS.x, y: pS.y };
+            }
+          }
+
+          finishPointerInteraction(e.pointerId);
+        }
+
+        function onPointerCancel(e) {
+          e.preventDefault();
+          finishPointerInteraction(e.pointerId);
+        }
+
+        function onPointerLeave(e) {
+          // quand on sort du canvas : on finit l'interaction
+          finishPointerInteraction(e.pointerId);
         }
 
         // --- Effets init + resize + clavier ---
@@ -1439,6 +1506,7 @@
           const canvas = canvasRef.current;
           const overlay = overlayRef.current;
           const cont = containerRef.current;
+
           const resize = () => {
             if (!canvas || !overlay || !cont) return;
             const dpr = window.devicePixelRatio || 1;
@@ -1453,6 +1521,7 @@
             });
             drawAll();
           };
+
           resize();
           const obs = new ResizeObserver(resize);
           obs.observe(cont);
@@ -1471,6 +1540,10 @@
             if (activeOverlayId && e.key === "Delete") {
               e.preventDefault();
               deleteActive();
+            }
+            if (editingCell && e.key === "Escape") {
+              e.preventDefault();
+              commitEditingCell(true);
             }
           }
           window.addEventListener("keydown", onKey);
@@ -1506,48 +1579,30 @@
         // --- Rendu JSX ---
         return (
           <div className="app-container">
-            {/* Toolbar */}
             <div className="toolbar">
-              <button
-                className={"chip" + (tool === "hand" ? " active" : "")}
-                onClick={() => setTool("hand")}
-              >
+              <button className={"chip" + (tool === "hand" ? " active" : "")} onClick={() => setTool("hand")}>
                 Main
               </button>
-              <button
-                className={"chip" + (tool === "move" ? " active" : "")}
-                onClick={() => setTool("move")}
-              >
+              <button className={"chip" + (tool === "move" ? " active" : "")} onClick={() => setTool("move")}>
                 Déplacer objets
               </button>
               <div className="sep" />
-              <button
-                className={"chip" + (tool === "pen" ? " active" : "")}
-                onClick={() => setTool("pen")}
-              >
+              <button className={"chip" + (tool === "pen" ? " active" : "")} onClick={() => setTool("pen")}>
                 Crayon
               </button>
-              <button
-                className={"chip" + (tool === "highlighter" ? " active" : "")}
-                onClick={() => setTool("highlighter")}
-              >
+              <button className={"chip" + (tool === "highlighter" ? " active" : "")} onClick={() => setTool("highlighter")}>
                 Surligneur
               </button>
-              <button
-                className={"chip" + (tool === "eraser" ? " active" : "")}
-                onClick={() => setTool("eraser")}
-              >
+              <button className={"chip" + (tool === "eraser" ? " active" : "")} onClick={() => setTool("eraser")}>
                 Gomme
               </button>
+
               <div className="sep" />
               <label className="label">
                 Couleur
-                <input
-                  type="color"
-                  value={color}
-                  onChange={(e) => setColor(e.target.value)}
-                />
+                <input type="color" value={color} onChange={(e) => setColor(e.target.value)} />
               </label>
+
               <label className="label">
                 Épaisseur
                 <input
@@ -1559,6 +1614,7 @@
                 />
                 <span style={{ width: 24, textAlign: "right" }}>{size}</span>
               </label>
+
               <div className="sep" />
               <button className="btn" onClick={undo}>
                 ⟲ Annuler
@@ -1569,12 +1625,14 @@
               <button className="btn" onClick={clearAll}>
                 Tout effacer
               </button>
+
               <button className="btn-green" onClick={exportPNG}>
                 Exporter PNG (page)
               </button>
               <button className="btn-primary" onClick={exportPDF}>
                 Exporter PDF (pages)
               </button>
+
               <div className="sep" />
               <label className="label">
                 Fond
@@ -1596,6 +1654,7 @@
                   <option value="lined">Ligné</option>
                 </select>
               </label>
+
               <div className="sep" />
               <button className="btn" onClick={() => zoomBy(1 / 1.2)}>
                 − Zoom
@@ -1608,7 +1667,6 @@
               </button>
             </div>
 
-            {/* Panel outils */}
             <ToolsPanel
               tool={tool}
               setTool={setTool}
@@ -1625,24 +1683,23 @@
               onPrev={goPrev}
               onNext={goNext}
               onFit={() => {
-                if (pages && pages[pageIndex])
-                  fitToPage(pages[pageIndex], pageAngles[pageIndex] || 0);
+                if (pages && pages[pageIndex]) fitToPage(pages[pageIndex], pageAngles[pageIndex] || 0);
               }}
               onAddBlankPage={addBlankPage}
               onRotateLeft={() => rotatePageDegrees(-90)}
               onRotateRight={() => rotatePageDegrees(90)}
             />
 
-            {/* Zone de dessin */}
             <div ref={containerRef} className="canvas-wrapper">
               <canvas
                 ref={canvasRef}
                 className="canvas-base"
                 onWheel={onWheel}
-                onMouseDown={onDown}
-                onMouseMove={onMove}
-                onMouseUp={onUp}
-                onMouseLeave={onUp}
+                onPointerDown={onPointerDown}
+                onPointerMove={onPointerMove}
+                onPointerUp={onPointerUp}
+                onPointerCancel={onPointerCancel}
+                onPointerLeave={onPointerLeave}
                 onDoubleClick={onDoubleClick}
               />
               <canvas ref={overlayRef} className="canvas-overlay" />
@@ -1652,9 +1709,7 @@
                   autoFocus
                   value={editingCell.value}
                   onChange={(e) =>
-                    setEditingCell((prev) =>
-                      prev ? { ...prev, value: e.target.value } : prev
-                    )
+                    setEditingCell((prev) => (prev ? { ...prev, value: e.target.value } : prev))
                   }
                   onBlur={() => commitEditingCell(false)}
                   onKeyDown={(e) => {
@@ -1714,28 +1769,16 @@
               <span className="label" style={{ fontWeight: 600 }}>
                 Formes
               </span>
-              <button
-                className={"chip" + (tool === "line" ? " active" : "")}
-                onClick={() => setTool("line")}
-              >
+              <button className={"chip" + (tool === "line" ? " active" : "")} onClick={() => setTool("line")}>
                 Ligne
               </button>
-              <button
-                className={"chip" + (tool === "rect" ? " active" : "")}
-                onClick={() => setTool("rect")}
-              >
+              <button className={"chip" + (tool === "rect" ? " active" : "")} onClick={() => setTool("rect")}>
                 Rect
               </button>
-              <button
-                className={"chip" + (tool === "ellipse" ? " active" : "")}
-                onClick={() => setTool("ellipse")}
-              >
+              <button className={"chip" + (tool === "ellipse" ? " active" : "")} onClick={() => setTool("ellipse")}>
                 Ellipse
               </button>
-              <button
-                className={"chip" + (tool === "arrow" ? " active" : "")}
-                onClick={() => setTool("arrow")}
-              >
+              <button className={"chip" + (tool === "arrow" ? " active" : "")} onClick={() => setTool("arrow")}>
                 Flèche
               </button>
             </div>
@@ -1755,22 +1798,12 @@
                   e.target.value = "";
                 }}
               />
-              <button
-                className="big-btn big-btn-primary"
-                onClick={() => fileRef.current && fileRef.current.click()}
-              >
+              <button className="big-btn big-btn-primary" onClick={() => fileRef.current && fileRef.current.click()}>
                 Importer (Image/PDF)
               </button>
-              <input
-                className="url-input"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="URL image ou PDF"
-              />
-              <button
-                className="big-btn big-btn-primary"
-                onClick={() => url && onImportURL(url)}
-              >
+
+              <input className="url-input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="URL image ou PDF" />
+              <button className="big-btn big-btn-primary" onClick={() => url && onImportURL(url)}>
                 Importer URL
               </button>
             </div>
@@ -1786,9 +1819,7 @@
                   min={1}
                   max={30}
                   value={rows}
-                  onChange={(e) =>
-                    setRows(parseInt(e.target.value, 10) || 1)
-                  }
+                  onChange={(e) => setRows(parseInt(e.target.value, 10) || 1)}
                   style={{ width: 60 }}
                 />
               </label>
@@ -1799,16 +1830,11 @@
                   min={1}
                   max={30}
                   value={cols}
-                  onChange={(e) =>
-                    setCols(parseInt(e.target.value, 10) || 1)
-                  }
+                  onChange={(e) => setCols(parseInt(e.target.value, 10) || 1)}
                   style={{ width: 60 }}
                 />
               </label>
-              <button
-                className="big-btn big-btn-primary"
-                onClick={() => onAddTable(rows, cols)}
-              >
+              <button className="big-btn big-btn-primary" onClick={() => onAddTable(rows, cols)}>
                 Insérer tableau
               </button>
             </div>
@@ -1837,24 +1863,26 @@
                   <button className="big-btn" onClick={onRotateRight}>
                     ⟳
                   </button>
-                  <button
-                    className="big-btn big-btn-primary"
-                    onClick={onAddBlankPage}
-                  >
+                  <button className="big-btn big-btn-primary" onClick={onAddBlankPage}>
                     + Page vierge
                   </button>
                 </>
               ) : (
                 <>
-                  <button
-                    className="big-btn big-btn-primary"
-                    onClick={onAddBlankPage}
-                  >
+                  <button className="big-btn big-btn-primary" onClick={onAddBlankPage}>
                     + Page vierge
                   </button>
                   <span className="hint">Aucune page importée</span>
                 </>
               )}
+            </div>
+
+            <div className="panel-section">
+              <span className="hint">
+                Astuce : sur mobile/tablette, utilisez <b>Main</b> pour déplacer la vue, et <b>Crayon</b> pour écrire au doigt ou au stylet.
+                <br />
+                Double-tap (doigt/stylet) sur une cellule de tableau pour l’éditer.
+              </span>
             </div>
           </div>
         );
