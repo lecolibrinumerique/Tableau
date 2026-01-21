@@ -1,0 +1,1867 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Tableau blanc magique - HTML standalone</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- React + ReactDOM depuis CDN -->
+    <script
+      src="https://unpkg.com/react@18/umd/react.development.js"
+      crossorigin
+    ></script>
+    <script
+      src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"
+      crossorigin
+    ></script>
+
+    <!-- Babel pour comprendre le JSX dans ce fichier -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <!-- jsPDF pour l'export PDF -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        background: linear-gradient(to bottom, #efe6d6, #eadfcf);
+        color: #3a2f1b;
+      }
+
+      .app-root {
+        min-height: 100vh;
+        padding: 16px;
+      }
+
+      .app-container {
+        max-width: 1200px;
+        margin: 0 auto;
+      }
+
+      .toolbar,
+      .panel {
+        background: rgba(255, 255, 255, 0.85);
+        border: 1px solid #e6dcc8;
+        border-radius: 12px;
+        padding: 8px 12px;
+        margin-bottom: 8px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+      }
+
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .panel {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 8px;
+      }
+
+      .panel-section {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .btn,
+      .chip,
+      .big-btn {
+        border-radius: 8px;
+        border: 1px solid #e6dcc8;
+        font-size: 13px;
+        padding: 6px 10px;
+        cursor: pointer;
+        background: #ffffff;
+      }
+
+      .btn:hover,
+      .chip:hover,
+      .big-btn:hover {
+        background: #f5efe4;
+      }
+
+      .btn-primary,
+      .big-btn-primary {
+        background: #f59e0b;
+        color: #ffffff;
+        border-color: #f59e0b;
+      }
+
+      .btn-primary:hover,
+      .big-btn-primary:hover {
+        background: #d97706;
+      }
+
+      .btn-green {
+        background: #059669;
+        color: #ffffff;
+        border-color: #059669;
+      }
+
+      .btn-green:hover {
+        background: #10b981;
+      }
+
+      .chip.active {
+        background: #fbbf24;
+        border-color: #f59e0b;
+        color: #3a2f1b;
+      }
+
+      .chip {
+        font-size: 12px;
+      }
+
+      .sep {
+        width: 1px;
+        height: 24px;
+        background: #e6dcc8;
+        margin: 0 4px;
+      }
+
+      .label {
+        font-size: 13px;
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      .label input[type="color"] {
+        border: none;
+        background: transparent;
+        padding: 0;
+        width: 24px;
+        height: 24px;
+      }
+
+      .label input[type="range"] {
+        width: 100px;
+      }
+
+      .label select,
+      .label input[type="number"],
+      .url-input {
+        border-radius: 6px;
+        border: 1px solid #e6dcc8;
+        padding: 3px 6px;
+        font-size: 13px;
+      }
+
+      .url-input {
+        min-width: 150px;
+        flex: 1;
+      }
+
+      .page-info {
+        font-size: 13px;
+        margin: 0 4px;
+      }
+
+      .canvas-wrapper {
+        position: relative;
+        border-radius: 16px;
+        overflow: hidden;
+        border: 1px solid #e6dcc8;
+        background: #f8f0df;
+        min-height: 70vh;
+      }
+
+      .canvas-base,
+      .canvas-overlay {
+        position: absolute;
+        inset: 0;
+      }
+
+      .canvas-overlay {
+        pointer-events: none;
+      }
+
+      .hint {
+        font-size: 11px;
+        color: #7b6546;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root" class="app-root"></div>
+
+    <script type="text/babel">
+      const { useState, useEffect, useRef } = React;
+
+      function uid() {
+        return (
+          Math.random().toString(36).slice(2) +
+          Date.now().toString(36)
+        );
+      }
+
+      function TableauBlancMagique() {
+        // Outils & style
+        const [tool, setTool] = useState("hand");
+        const [color, setColor] = useState("#5b4636");
+        const [size, setSize] = useState(6);
+
+        // Fond par page
+        const [pageBgs, setPageBgs] = useState([]); // "plain" | "grid" | "lined"
+
+        // Document multi-pages
+        const [pages, setPages] = useState(null); // array of canvases
+        const [pageIndex, setPageIndex] = useState(0);
+        const [pageAngles, setPageAngles] = useState([]); // angle par page (radians)
+        const pagesDataRef = useRef([]); // states per page
+
+        // États actifs (page courante)
+        const [strokes, setStrokes] = useState([]);
+        const [shapes, setShapes] = useState([]);
+        const [overlays, setOverlays] = useState([]); // images + tables
+
+        // Dessin en cours
+        const [isDrawing, setIsDrawing] = useState(false);
+        const [currentPoints, setCurrentPoints] = useState([]);
+        const [shapeStart, setShapeStart] = useState(null);
+
+        // Sélection & déplacement/redimensionnement d’objets
+        const [activeOverlayId, setActiveOverlayId] = useState(null);
+        const [activePart, setActivePart] = useState(null);
+        const [dragOffset, setDragOffset] = useState({ dx: 0, dy: 0 });
+
+        // Redimensionnement table
+        const resizeRef = useRef(null);
+
+        // Historique
+        const undoRef = useRef([]);
+        const redoRef = useRef([]);
+
+        // Canvas & viewport
+        const canvasRef = useRef(null);
+        const overlayRef = useRef(null);
+        const containerRef = useRef(null);
+        const viewRef = useRef({ tx: 0, ty: 0, scale: 1 });
+        const panningRef = useRef({
+          active: false,
+          startX: 0,
+          startY: 0,
+          startTx: 0,
+          startTy: 0,
+        });
+
+        // Dernier point
+        const lastPointScreen = useRef(null);
+        const lastPointWorld = useRef(null);
+
+        // Edition cellule table
+        const [editingCell, setEditingCell] = useState(null);
+
+        const currentBg = pageBgs[pageIndex] || "plain";
+
+        // --- Historique ---
+        function cloneState() {
+          return {
+            strokes: JSON.parse(JSON.stringify(strokes)),
+            shapes: JSON.parse(JSON.stringify(shapes)),
+            overlays: JSON.parse(JSON.stringify(overlays)),
+          };
+        }
+
+        function restoreState(st) {
+          setStrokes(st.strokes);
+          setShapes(st.shapes);
+          setOverlays(st.overlays);
+        }
+
+        function pushHistory() {
+          undoRef.current.push(cloneState());
+          redoRef.current = [];
+        }
+
+        function undo() {
+          const prev = undoRef.current.pop();
+          if (!prev) return;
+          redoRef.current.push(cloneState());
+          restoreState(prev);
+        }
+
+        function redo() {
+          const next = redoRef.current.pop();
+          if (!next) return;
+          undoRef.current.push(cloneState());
+          restoreState(next);
+        }
+
+        function clearAll() {
+          pushHistory();
+          setStrokes([]);
+          setShapes([]);
+          setOverlays([]);
+          saveCurrentPage();
+        }
+
+        // --- Coordonnées ---
+        function getScreenPos(e) {
+          const rect = canvasRef.current.getBoundingClientRect();
+          const dpr = window.devicePixelRatio || 1;
+          return {
+            x: (e.clientX - rect.left) * dpr,
+            y: (e.clientY - rect.top) * dpr,
+          };
+        }
+
+        function screenToWorld(p) {
+          const { tx, ty, scale } = viewRef.current;
+          return { x: (p.x - tx) / scale, y: (p.y - ty) / scale };
+        }
+
+        function worldToLocalGeneric(it, p) {
+          const angle = it.angle || 0;
+          const s = Math.sin(-angle);
+          const c = Math.cos(-angle);
+          const dx = p.x - it.x;
+          const dy = p.y - it.y;
+          const lx = dx * c - dy * s;
+          const ly = dx * s + dy * c;
+          return { lx, ly };
+        }
+
+        function worldToScreenCss(p) {
+          const { tx, ty, scale } = viewRef.current;
+          const dpr = window.devicePixelRatio || 1;
+          return {
+            x: (tx + p.x * scale) / dpr,
+            y: (ty + p.y * scale) / dpr,
+          };
+        }
+
+        // --- Zoom / pan ---
+        function onWheel(e) {
+          if (!(e.ctrlKey || e.metaKey)) return;
+          e.preventDefault();
+          const factor = Math.exp(-e.deltaY * 0.001);
+          const prev = viewRef.current.scale;
+          const next = Math.min(4, Math.max(0.2, prev * factor));
+          const mouse = getScreenPos(e);
+          const { tx, ty, scale } = viewRef.current;
+          const wx = (mouse.x - tx) / scale;
+          const wy = (mouse.y - ty) / scale;
+          viewRef.current.scale = next;
+          viewRef.current.tx = mouse.x - wx * next;
+          viewRef.current.ty = mouse.y - wy * next;
+          drawAll();
+        }
+
+        function beginPan(p) {
+          const v = viewRef.current;
+          panningRef.current = {
+            active: true,
+            startX: p.x,
+            startY: p.y,
+            startTx: v.tx,
+            startTy: v.ty,
+          };
+        }
+
+        function updatePan(p) {
+          const pan = panningRef.current;
+          if (!pan.active) return;
+          const dx = p.x - pan.startX;
+          const dy = p.y - pan.startY;
+          viewRef.current.tx = pan.startTx + dx;
+          viewRef.current.ty = pan.startTy + dy;
+          drawAll();
+        }
+
+        function endPan() {
+          panningRef.current.active = false;
+        }
+
+        // --- Hit test overlays (image / table) ---
+        function hitTestOverlayWorld(x, y, list) {
+          for (let i = list.length - 1; i >= 0; i--) {
+            const it = list[i];
+            if (it.type === "table") {
+              const t = it;
+              const { lx, ly } = worldToLocalGeneric(t, { x, y });
+              if (lx < 0 || ly < 0 || lx > t.w || ly > t.h) continue;
+
+              const handleSize = 14;
+              const near = (px, py) =>
+                Math.abs(lx - px) <= handleSize &&
+                Math.abs(ly - py) <= handleSize;
+
+              if (near(0, 0)) return { id: t.id, part: "table-resize-tl" };
+              if (near(t.w, 0)) return { id: t.id, part: "table-resize-tr" };
+              if (near(0, t.h)) return { id: t.id, part: "table-resize-bl" };
+              if (near(t.w, t.h)) return { id: t.id, part: "table-resize-br" };
+
+              return { id: t.id, part: "body" };
+            } else if (it.type === "image") {
+              const im = it;
+              const { lx, ly } = worldToLocalGeneric(im, { x, y });
+              if (lx >= 0 && ly >= 0 && lx <= im.w && ly <= im.h) {
+                return { id: im.id, part: "body" };
+              }
+            }
+          }
+          return null;
+        }
+
+        // --- Dessin principal ---
+        function drawBase(ctx, w, h) {
+          ctx.fillStyle = "#f8f0df";
+          ctx.fillRect(0, 0, w, h);
+        }
+
+        function drawPattern(ctx, w, h, bgName) {
+          if (bgName === "grid") {
+            ctx.save();
+            ctx.globalAlpha = 0.6;
+            ctx.strokeStyle = "rgba(91,70,54,0.15)";
+            ctx.lineWidth = 1;
+            for (let x = 0; x < w; x += 40) {
+              ctx.beginPath();
+              ctx.moveTo(x + 0.5, 0);
+              ctx.lineTo(x + 0.5, h);
+              ctx.stroke();
+            }
+            for (let y = 0; y < h; y += 40) {
+              ctx.beginPath();
+              ctx.moveTo(0, y + 0.5);
+              ctx.lineTo(w, y + 0.5);
+              ctx.stroke();
+            }
+            ctx.restore();
+          } else if (bgName === "lined") {
+            ctx.save();
+            ctx.globalAlpha = 0.7;
+            ctx.strokeStyle = "rgba(56,189,248,0.35)";
+            ctx.lineWidth = 2;
+            for (let y = 50; y < h; y += 40) {
+              ctx.beginPath();
+              ctx.moveTo(0, y + 0.5);
+              ctx.lineTo(w, y + 0.5);
+              ctx.stroke();
+            }
+            ctx.strokeStyle = "rgba(244,63,94,0.35)";
+            ctx.beginPath();
+            ctx.moveTo(120 + 0.5, 0);
+            ctx.lineTo(120 + 0.5, h);
+            ctx.stroke();
+            ctx.restore();
+          }
+        }
+
+        function drawStroke(ctx, s) {
+          ctx.save();
+          if (s.tool === "eraser") {
+            ctx.globalCompositeOperation = "destination-out";
+            ctx.strokeStyle = "rgba(0,0,0,1)";
+          } else if (s.tool === "highlighter") {
+            ctx.globalAlpha = 0.3;
+            ctx.strokeStyle = s.color;
+          } else {
+            ctx.globalCompositeOperation = "source-over";
+            ctx.globalAlpha = 1;
+            ctx.strokeStyle = s.color;
+          }
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          ctx.lineWidth = s.size;
+          ctx.beginPath();
+          for (let i = 0; i < s.points.length; i++) {
+            const p = s.points[i];
+            if (i === 0) ctx.moveTo(p.x, p.y);
+            else ctx.lineTo(p.x, p.y);
+          }
+          ctx.stroke();
+          ctx.restore();
+        }
+
+        function drawArrow(ctx, a, b, size, color) {
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+          const ang = Math.atan2(b.y - a.y, b.x - a.x);
+          const ah = Math.max(12, size * 2);
+          const p1 = {
+            x: b.x - ah * Math.cos(ang - Math.PI / 6),
+            y: b.y - ah * Math.sin(ang - Math.PI / 6),
+          };
+          const p2 = {
+            x: b.x - ah * Math.cos(ang + Math.PI / 6),
+            y: b.y - ah * Math.sin(ang + Math.PI / 6),
+          };
+          ctx.beginPath();
+          ctx.moveTo(b.x, b.y);
+          ctx.lineTo(p1.x, p1.y);
+          ctx.lineTo(p2.x, p2.y);
+          ctx.closePath();
+          ctx.fillStyle = color;
+          ctx.fill();
+        }
+
+        function drawShape(ctx, sh, preview = false) {
+          ctx.save();
+          ctx.strokeStyle = sh.color;
+          ctx.lineWidth = sh.size;
+          ctx.lineCap = "round";
+          ctx.lineJoin = "round";
+          if (preview) ctx.setLineDash([8, 8]);
+
+          if (sh.kind === "line") {
+            ctx.beginPath();
+            ctx.moveTo(sh.a.x, sh.a.y);
+            ctx.lineTo(sh.b.x, sh.b.y);
+            ctx.stroke();
+          } else if (sh.kind === "rect") {
+            const x = Math.min(sh.a.x, sh.b.x);
+            const y = Math.min(sh.a.y, sh.b.y);
+            const w = Math.abs(sh.a.x - sh.b.x);
+            const h = Math.abs(sh.a.y - sh.b.y);
+            ctx.strokeRect(x, y, w, h);
+          } else if (sh.kind === "ellipse") {
+            const x = (sh.a.x + sh.b.x) / 2;
+            const y = (sh.a.y + sh.b.y) / 2;
+            const rx = Math.abs(sh.a.x - sh.b.x) / 2;
+            const ry = Math.abs(sh.a.y - sh.b.y) / 2;
+            ctx.beginPath();
+            ctx.ellipse(x, y, rx, ry, 0, 0, Math.PI * 2);
+            ctx.stroke();
+          } else if (sh.kind === "arrow") {
+            drawArrow(ctx, sh.a, sh.b, sh.size, sh.color);
+          } else if (sh.kind === "circle") {
+            ctx.beginPath();
+            ctx.arc(sh.c.x, sh.c.y, sh.r, 0, Math.PI * 2);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+
+        function drawOverlay(ctx, item) {
+          ctx.save();
+          if (item.type === "image") {
+            const it = item;
+            ctx.translate(it.x, it.y);
+            ctx.rotate(it.angle || 0);
+            if (it.img) ctx.drawImage(it.img, 0, 0, it.w, it.h);
+            ctx.strokeStyle = "rgba(0,0,0,0.2)";
+            ctx.strokeRect(0, 0, it.w, it.h);
+            ctx.restore();
+            return;
+          }
+          if (item.type === "table") {
+            const it = item;
+            ctx.translate(it.x, it.y);
+            ctx.rotate(it.angle || 0);
+
+            // fond
+            ctx.fillStyle = "rgba(0,0,0,0.03)";
+            ctx.fillRect(0, 0, it.w, it.h);
+
+            // grille
+            ctx.strokeStyle = "rgba(0,0,0,0.25)";
+            ctx.lineWidth = 1;
+            for (let r = 0; r <= it.rows; r++) {
+              const y = r * it.cellH;
+              ctx.beginPath();
+              ctx.moveTo(0, y);
+              ctx.lineTo(it.w, y);
+              ctx.stroke();
+            }
+            for (let c = 0; c <= it.cols; c++) {
+              const x = c * it.cellW;
+              ctx.beginPath();
+              ctx.moveTo(x, 0);
+              ctx.lineTo(x, it.h);
+              ctx.stroke();
+            }
+
+            // texte
+            ctx.fillStyle = "#3a2f1b";
+            ctx.font = "13px system-ui, sans-serif";
+            ctx.textAlign = "left";
+            ctx.textBaseline = "middle";
+            const padX = 4;
+            for (let r = 0; r < it.rows; r++) {
+              for (let c = 0; c < it.cols; c++) {
+                const txt = it.data[r]?.[c];
+                if (!txt) continue;
+                const x = c * it.cellW + padX;
+                const y = r * it.cellH + it.cellH / 2;
+                ctx.fillText(txt, x, y);
+              }
+            }
+
+            // poignées de redimensionnement
+            function drawHandle(x, y) {
+              ctx.fillStyle = "#f97316";
+              ctx.fillRect(x - 4, y - 4, 8, 8);
+              ctx.strokeStyle = "#ffffff";
+              ctx.lineWidth = 1;
+              ctx.strokeRect(x - 4, y - 4, 8, 8);
+            }
+            drawHandle(0, 0);
+            drawHandle(it.w, 0);
+            drawHandle(0, it.h);
+            drawHandle(it.w, it.h);
+
+            ctx.restore();
+          }
+          ctx.restore();
+        }
+
+        function drawAll() {
+          if (!canvasRef.current || !overlayRef.current) return;
+          const canvas = canvasRef.current;
+          const ctx = canvas.getContext("2d");
+          const overlay = overlayRef.current;
+          const octx = overlay.getContext("2d");
+
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          octx.clearRect(0, 0, overlay.width, overlay.height);
+
+          drawBase(ctx, canvas.width, canvas.height);
+
+          const { tx, ty, scale } = viewRef.current;
+          ctx.save();
+          ctx.translate(tx, ty);
+          ctx.scale(scale, scale);
+
+          const page =
+            pages && pages.length > 0 ? pages[pageIndex] : null;
+          const angle =
+            pageAngles[pageIndex] !== undefined ? pageAngles[pageIndex] : 0;
+
+          // Page (PDF / image) avec rotation
+          if (page) {
+            ctx.save();
+            const cx = page.width / 2;
+            const cy = page.height / 2;
+            ctx.translate(cx, cy);
+            ctx.rotate(angle);
+            ctx.drawImage(page, -page.width / 2, -page.height / 2);
+            ctx.restore();
+          }
+
+          // Fond ligné / quadrillé sur toute la surface visible
+          const worldW = canvas.width / scale;
+          const worldH = canvas.height / scale;
+          drawPattern(ctx, worldW, worldH, currentBg);
+
+          // strokes
+          strokes.forEach((s) => drawStroke(ctx, s));
+          if (
+            isDrawing &&
+            currentPoints.length > 1 &&
+            (tool === "pen" || tool === "highlighter" || tool === "eraser")
+          ) {
+            drawStroke(ctx, {
+              tool,
+              color,
+              size,
+              points: currentPoints,
+            });
+          }
+
+          // shapes
+          shapes.forEach((sh) => drawShape(ctx, sh));
+          if (
+            shapeStart &&
+            (tool === "line" ||
+              tool === "rect" ||
+              tool === "ellipse" ||
+              tool === "arrow")
+          ) {
+            const mouse = lastPointWorld.current;
+            if (mouse) {
+              const temp =
+                tool === "ellipse"
+                  ? { kind: "ellipse", color, size, a: shapeStart, b: mouse }
+                  : { kind: tool, color, size, a: shapeStart, b: mouse };
+              drawShape(ctx, temp, true);
+            }
+          }
+
+          // overlays
+          octx.save();
+          octx.translate(tx, ty);
+          octx.scale(scale, scale);
+          overlays.forEach((item) => drawOverlay(octx, item));
+          octx.restore();
+
+          ctx.restore();
+        }
+
+        // --- souris ---
+        function onDown(e) {
+          const pS = getScreenPos(e);
+          const pW = screenToWorld(pS);
+          lastPointScreen.current = pS;
+          lastPointWorld.current = pW;
+
+          if (tool === "hand") {
+            beginPan(pS);
+            return;
+          }
+
+          if (tool === "move") {
+            const hit = hitTestOverlayWorld(pW.x, pW.y, overlays);
+            resizeRef.current = null;
+
+            if (hit) {
+              setActiveOverlayId(hit.id);
+              setActivePart(hit.part);
+              const item = overlays.find((o) => o.id === hit.id);
+              if (!item) return;
+
+              if (hit.part === "body") {
+                setDragOffset({
+                  dx: pW.x - item.x,
+                  dy: pW.y - item.y,
+                });
+              } else if (hit.part.startsWith("table-resize")) {
+                const t = item;
+                const anchor = hit.part.slice("table-resize-".length); // tl/tr/bl/br
+                resizeRef.current = {
+                  startX: pW.x,
+                  startY: pW.y,
+                  startW: t.w,
+                  startH: t.h,
+                  startPx: t.x,
+                  startPy: t.y,
+                  anchor,
+                };
+              }
+            } else {
+              setActiveOverlayId(null);
+              setActivePart(null);
+            }
+            return;
+          }
+
+          if (tool === "pen" || tool === "highlighter" || tool === "eraser") {
+            pushHistory();
+            setIsDrawing(true);
+            setCurrentPoints([pW]);
+          } else if (
+            tool === "line" ||
+            tool === "rect" ||
+            tool === "ellipse" ||
+            tool === "arrow"
+          ) {
+            pushHistory();
+            setShapeStart(pW);
+          }
+        }
+
+        function onMove(e) {
+          const pS = getScreenPos(e);
+          const pW = screenToWorld(pS);
+          lastPointScreen.current = pS;
+          lastPointWorld.current = pW;
+
+          if (tool === "hand") {
+            updatePan(pS);
+            return;
+          }
+
+          if (tool === "move" && activeOverlayId) {
+            setOverlays((prev) =>
+              prev.map((o) => {
+                if (o.id !== activeOverlayId) return o;
+
+                if (activePart === "body") {
+                  return {
+                    ...o,
+                    x: pW.x - dragOffset.dx,
+                    y: pW.y - dragOffset.dy,
+                  };
+                }
+
+                if (o.type === "table" && activePart?.startsWith("table-resize")) {
+                  const info = resizeRef.current;
+                  if (!info) return o;
+                  const dx = pW.x - info.startX;
+                  const dy = pW.y - info.startY;
+                  let newW = info.startW;
+                  let newH = info.startH;
+                  let newX = info.startPx;
+                  let newY = info.startPy;
+                  const minSize = 40;
+
+                  switch (info.anchor) {
+                    case "br":
+                      newW = Math.max(minSize, info.startW + dx);
+                      newH = Math.max(minSize, info.startH + dy);
+                      break;
+                    case "tr":
+                      newW = Math.max(minSize, info.startW + dx);
+                      newH = Math.max(minSize, info.startH - dy);
+                      newY = info.startPy + (info.startH - newH);
+                      break;
+                    case "bl":
+                      newW = Math.max(minSize, info.startW - dx);
+                      newH = Math.max(minSize, info.startH + dy);
+                      newX = info.startPx + (info.startW - newW);
+                      break;
+                    case "tl":
+                      newW = Math.max(minSize, info.startW - dx);
+                      newH = Math.max(minSize, info.startH - dy);
+                      newX = info.startPx + (info.startW - newW);
+                      newY = info.startPy + (info.startH - newH);
+                      break;
+                  }
+
+                  const cellW = newW / o.cols;
+                  const cellH = newH / o.rows;
+                  return {
+                    ...o,
+                    x: newX,
+                    y: newY,
+                    w: newW,
+                    h: newH,
+                    cellW,
+                    cellH,
+                  };
+                }
+
+                return o;
+              })
+            );
+            drawAll();
+            return;
+          }
+
+          if (isDrawing) {
+            setCurrentPoints((prev) => [...prev, pW]);
+            drawAll();
+          } else if (shapeStart) {
+            drawAll();
+          }
+        }
+
+        function onUp() {
+          if (tool === "hand") {
+            endPan();
+            return;
+          }
+
+          if (tool === "pen" || tool === "highlighter" || tool === "eraser") {
+            if (isDrawing && currentPoints.length > 1) {
+              const s = { tool, color, size, points: currentPoints };
+              setStrokes((prev) => [...prev, s]);
+            }
+            setIsDrawing(false);
+            setCurrentPoints([]);
+          } else if (shapeStart && lastPointWorld.current) {
+            const a = shapeStart;
+            const b = lastPointWorld.current;
+            const sh =
+              tool === "ellipse"
+                ? { kind: "ellipse", color, size, a, b }
+                : { kind: tool, color, size, a, b };
+            setShapes((prev) => [...prev, sh]);
+            setShapeStart(null);
+          }
+
+          setActiveOverlayId(null);
+          setActivePart(null);
+          resizeRef.current = null;
+          drawAll();
+          saveCurrentPage();
+        }
+
+        // double-clic : éditer cellule de tableau
+        function onDoubleClick(e) {
+          const pS = getScreenPos(e);
+          const pW = screenToWorld(pS);
+
+          for (let i = overlays.length - 1; i >= 0; i--) {
+            const ov = overlays[i];
+            if (ov.type !== "table") continue;
+            const t = ov;
+            const { lx, ly } = worldToLocalGeneric(t, pW);
+            if (lx < 0 || ly < 0 || lx > t.w || ly > t.h) continue;
+
+            let col = Math.floor(lx / t.cellW);
+            let row = Math.floor(ly / t.cellH);
+            col = Math.min(Math.max(col, 0), t.cols - 1);
+            row = Math.min(Math.max(row, 0), t.rows - 1);
+
+            const cellTopLeftWorld = {
+              x: t.x + col * t.cellW,
+              y: t.y + row * t.cellH,
+            };
+            const cellBottomRightWorld = {
+              x: t.x + (col + 1) * t.cellW,
+              y: t.y + (row + 1) * t.cellH,
+            };
+
+            const cssTL = worldToScreenCss(cellTopLeftWorld);
+            const cssBR = worldToScreenCss(cellBottomRightWorld);
+
+            const value = t.data[row]?.[col] ?? "";
+
+            setEditingCell({
+              tableId: t.id,
+              row,
+              col,
+              value,
+              left: cssTL.x,
+              top: cssTL.y,
+              width: cssBR.x - cssTL.x,
+              height: cssBR.y - cssTL.y,
+            });
+            return;
+          }
+        }
+
+        function commitEditingCell(cancel = false) {
+          if (!editingCell) return;
+          if (!cancel) {
+            const { tableId, row, col, value } = editingCell;
+            setOverlays((prev) =>
+              prev.map((ov) => {
+                if (ov.type !== "table" || ov.id !== tableId) return ov;
+                const data = ov.data.map((r) => r.slice());
+                if (!data[row]) data[row] = [];
+                data[row][col] = value;
+                return { ...ov, data };
+              })
+            );
+            saveCurrentPage();
+          }
+          setEditingCell(null);
+        }
+
+        // --- Insertions ---
+        function addImageFile(file) {
+          const url = URL.createObjectURL(file);
+          const img = new Image();
+          img.onload = () => {
+            URL.revokeObjectURL(url);
+            drawAll();
+          };
+          img.src = url;
+          const item = {
+            id: uid(),
+            type: "image",
+            x: 100,
+            y: 100,
+            w: 400,
+            h: 300,
+            angle: 0,
+            src: url,
+            img,
+          };
+          pushHistory();
+          setOverlays((prev) => [...prev, item]);
+          saveCurrentPage();
+        }
+
+        function addImageURL(url) {
+          const img = new Image();
+          img.crossOrigin = "anonymous";
+          img.onload = () => drawAll();
+          img.src = url;
+          const item = {
+            id: uid(),
+            type: "image",
+            x: 120,
+            y: 120,
+            w: 400,
+            h: 300,
+            angle: 0,
+            src: url,
+            img,
+          };
+          pushHistory();
+          setOverlays((prev) => [...prev, item]);
+          saveCurrentPage();
+        }
+
+        function addTable(rows, cols) {
+          const data = Array.from({ length: rows }, () =>
+            Array.from({ length: cols }, () => "")
+          );
+          const cellW = 100;
+          const cellH = 40;
+          const item = {
+            id: uid(),
+            type: "table",
+            x: 140,
+            y: 140,
+            w: cols * cellW,
+            h: rows * cellH,
+            angle: 0,
+            rows,
+            cols,
+            data,
+            cellW,
+            cellH,
+          };
+          pushHistory();
+          setOverlays((prev) => [...prev, item]);
+          saveCurrentPage();
+        }
+
+        // --- PDF / URL ---
+        async function ensurePdfJs() {
+          const g = window;
+          if (g.pdfjsLib) return g.pdfjsLib;
+          await loadScript(
+            "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.9.179/pdf.min.js"
+          );
+          if (g.pdfjsLib) {
+            g.pdfjsLib.GlobalWorkerOptions.workerSrc =
+              "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.9.179/pdf.worker.min.js";
+            return g.pdfjsLib;
+          }
+          return null;
+        }
+
+        function loadScript(src) {
+          return new Promise((resolve, reject) => {
+            const s = document.createElement("script");
+            s.src = src;
+            s.onload = () => resolve();
+            s.onerror = () => reject();
+            document.head.appendChild(s);
+          });
+        }
+
+        async function importPDF(file) {
+          const pdfjs = await ensurePdfJs();
+          if (!pdfjs) {
+            alert("Impossible de charger pdf.js.");
+            return;
+          }
+          const buf = await file.arrayBuffer();
+          const doc = await pdfjs.getDocument({ data: buf }).promise;
+          const newPages = [];
+          for (let i = 1; i <= doc.numPages; i++) {
+            const page = await doc.getPage(i);
+            const viewport = page.getViewport({ scale: 2 });
+            const cnv = document.createElement("canvas");
+            cnv.width = viewport.width;
+            cnv.height = viewport.height;
+            const ctx = cnv.getContext("2d");
+            await page.render({ canvasContext: ctx, viewport }).promise;
+            newPages.push(cnv);
+          }
+          setPages(newPages);
+          setPageAngles(newPages.map(() => 0));
+          setPageBgs(newPages.map(() => "plain"));
+          pagesDataRef.current = newPages.map(() => ({
+            strokes: [],
+            shapes: [],
+            overlays: [],
+          }));
+          setPageIndex(0);
+          restoreState({ strokes: [], shapes: [], overlays: [] });
+          fitToPage(newPages[0], 0);
+        }
+
+        async function importFromURL(url) {
+          if (/\.pdf(\?.*)?$/i.test(url)) {
+            const pdfjs = await ensurePdfJs();
+            if (!pdfjs) {
+              alert("Impossible de charger pdf.js.");
+              return;
+            }
+            const doc = await pdfjs.getDocument({ url }).promise;
+            const newPages = [];
+            for (let i = 1; i <= doc.numPages; i++) {
+              const page = await doc.getPage(i);
+              const viewport = page.getViewport({ scale: 2 });
+              const cnv = document.createElement("canvas");
+              cnv.width = viewport.width;
+              cnv.height = viewport.height;
+              const ctx = cnv.getContext("2d");
+              await page.render({ canvasContext: ctx, viewport }).promise;
+              newPages.push(cnv);
+            }
+            setPages(newPages);
+            setPageAngles(newPages.map(() => 0));
+            setPageBgs(newPages.map(() => "plain"));
+            pagesDataRef.current = newPages.map(() => ({
+              strokes: [],
+              shapes: [],
+              overlays: [],
+            }));
+            setPageIndex(0);
+            restoreState({ strokes: [], shapes: [], overlays: [] });
+            fitToPage(newPages[0], 0);
+          } else {
+            addImageURL(url);
+          }
+        }
+
+        // --- Pages ---
+        function makeBlankCanvas() {
+          const c = document.createElement("canvas");
+          const baseW = 1200;
+          const baseH = 800;
+          c.width = baseW;
+          c.height = baseH;
+          return c;
+        }
+
+        function addBlankPage() {
+          if (!pages || pages.length === 0) {
+            const first = makeBlankCanvas();
+            const second = makeBlankCanvas();
+            const newPages = [first, second];
+            setPages(newPages);
+            setPageAngles([0, 0]);
+            setPageBgs(["plain", "plain"]);
+            pagesDataRef.current = [cloneState(), { strokes: [], shapes: [], overlays: [] }];
+            setPageIndex(1);
+            restoreState({ strokes: [], shapes: [], overlays: [] });
+            fitToPage(second, 0);
+          } else {
+            const c = makeBlankCanvas();
+            const newPages = [...pages, c];
+            setPages(newPages);
+            setPageAngles((prev) => [...prev, 0]);
+            setPageBgs((prev) => [...prev, "plain"]);
+            pagesDataRef.current = [
+              ...pagesDataRef.current,
+              { strokes: [], shapes: [], overlays: [] },
+            ];
+            setPageIndex(newPages.length - 1);
+            restoreState({ strokes: [], shapes: [], overlays: [] });
+            fitToPage(c, 0);
+          }
+        }
+
+        function clonePage(i) {
+          const st =
+            pagesDataRef.current[i] || {
+              strokes: [],
+              shapes: [],
+              overlays: [],
+            };
+          return {
+            strokes: JSON.parse(JSON.stringify(st.strokes)),
+            shapes: JSON.parse(JSON.stringify(st.shapes)),
+            overlays: JSON.parse(JSON.stringify(st.overlays)),
+          };
+        }
+
+        function saveCurrentPage() {
+          if (!pages) return;
+          pagesDataRef.current[pageIndex] = cloneState();
+        }
+
+        function goPrev() {
+          if (!pages || pageIndex <= 0) return;
+          saveCurrentPage();
+          const i = pageIndex - 1;
+          setPageIndex(i);
+          restoreState(clonePage(i));
+          const ang = pageAngles[i] || 0;
+          fitToPage(pages[i], ang);
+        }
+
+        function goNext() {
+          if (!pages || pageIndex >= pages.length - 1) return;
+          saveCurrentPage();
+          const i = pageIndex + 1;
+          setPageIndex(i);
+          restoreState(clonePage(i));
+          const ang = pageAngles[i] || 0;
+          fitToPage(pages[i], ang);
+        }
+
+        function rotatePageDegrees(deltaDeg) {
+          if (!pages || pages.length === 0) return;
+          const delta = (deltaDeg * Math.PI) / 180;
+          setPageAngles((prev) => {
+            const arr = prev ? prev.slice() : [];
+            const len = pages.length;
+            while (arr.length < len) arr.push(0);
+            const cur = arr[pageIndex] || 0;
+            const twoPI = Math.PI * 2;
+            let ang = cur + delta;
+            ang = ((ang % twoPI) + twoPI) % twoPI;
+            arr[pageIndex] = ang;
+            return arr;
+          });
+          const page = pages[pageIndex];
+          if (page) {
+            const cur = pageAngles[pageIndex] || 0;
+            const twoPI = Math.PI * 2;
+            let newAngle = cur + delta;
+            newAngle = ((newAngle % twoPI) + twoPI) % twoPI;
+            fitToPage(page, newAngle);
+          }
+        }
+
+        // --- Export PNG (page courante) ---
+        function exportPNG() {
+          if (!canvasRef.current || !overlayRef.current) return;
+          const base = document.createElement("canvas");
+          const c = canvasRef.current;
+          const o = overlayRef.current;
+          base.width = c.width;
+          base.height = c.height;
+          const bctx = base.getContext("2d");
+
+          const page =
+            pages && pages.length > 0 ? pages[pageIndex] : null;
+          const angle =
+            pageAngles[pageIndex] !== undefined ? pageAngles[pageIndex] : 0;
+          const bgForPage = currentBg;
+
+          drawBase(bctx, base.width, base.height);
+          bctx.save();
+          const { tx, ty, scale } = viewRef.current;
+          bctx.translate(tx, ty);
+          bctx.scale(scale, scale);
+
+          if (page) {
+            bctx.save();
+            const cx = page.width / 2;
+            const cy = page.height / 2;
+            bctx.translate(cx, cy);
+            bctx.rotate(angle);
+            bctx.drawImage(page, -page.width / 2, -page.height / 2);
+            bctx.restore();
+          }
+
+          const worldW = base.width / scale;
+          const worldH = base.height / scale;
+          drawPattern(bctx, worldW, worldH, bgForPage);
+
+          strokes.forEach((s) => drawStroke(bctx, s));
+          shapes.forEach((sh) => drawShape(bctx, sh));
+          bctx.restore();
+
+          const tmp = document.createElement("canvas");
+          tmp.width = o.width;
+          tmp.height = o.height;
+          const tctx = tmp.getContext("2d");
+          tctx.save();
+          const { tx: tx2, ty: ty2, scale: sc2 } = viewRef.current;
+          tctx.translate(tx2, ty2);
+          tctx.scale(sc2, sc2);
+          overlays.forEach((it) => drawOverlay(tctx, it));
+          tctx.restore();
+          bctx.drawImage(tmp, 0, 0);
+
+          const url = base.toDataURL("image/png");
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `tableau_blanc_page${pageIndex + 1}_${Date.now()}.png`;
+          a.click();
+        }
+
+        // --- Export PDF (pages choisies) ---
+        function parsePageSelection(str, total) {
+          if (!str || !str.trim()) {
+            return Array.from({ length: total }, (_, i) => i);
+          }
+          const result = new Set();
+          const parts = str.split(",");
+          for (const part of parts) {
+            const p = part.trim();
+            if (!p) continue;
+            if (p.includes("-")) {
+              const [a, b] = p.split("-").map((x) => parseInt(x.trim(), 10));
+              if (isNaN(a) || isNaN(b)) continue;
+              const start = Math.max(1, Math.min(a, b));
+              const end = Math.min(total, Math.max(a, b));
+              for (let i = start; i <= end; i++) result.add(i - 1);
+            } else {
+              const n = parseInt(p, 10);
+              if (!isNaN(n) && n >= 1 && n <= total) {
+                result.add(n - 1);
+              }
+            }
+          }
+          return Array.from(result).sort((a, b) => a - b);
+        }
+
+        function renderPageToCanvas(pageIdx, targetCanvas) {
+          const ctx = targetCanvas.getContext("2d");
+          const state = clonePage(pageIdx);
+          const page =
+            pages && pages.length > 0 ? pages[pageIdx] : null;
+          const angle =
+            pageAngles[pageIdx] !== undefined ? pageAngles[pageIdx] : 0;
+          const bgForPage = pageBgs[pageIdx] || "plain";
+
+          ctx.clearRect(0, 0, targetCanvas.width, targetCanvas.height);
+          drawBase(ctx, targetCanvas.width, targetCanvas.height);
+
+          if (page) {
+            ctx.save();
+            const cx = page.width / 2;
+            const cy = page.height / 2;
+            ctx.translate(cx, cy);
+            ctx.rotate(angle);
+            ctx.drawImage(page, -page.width / 2, -page.height / 2);
+            ctx.restore();
+          }
+
+          drawPattern(ctx, targetCanvas.width, targetCanvas.height, bgForPage);
+
+          state.strokes.forEach((s) => drawStroke(ctx, s));
+          state.shapes.forEach((sh) => drawShape(ctx, sh));
+          state.overlays.forEach((ov) => drawOverlay(ctx, ov));
+        }
+
+        function exportPDF() {
+          if (!pages || pages.length === 0) {
+            alert("Aucune page à exporter.");
+            return;
+          }
+          if (!window.jspdf || !window.jspdf.jsPDF) {
+            alert("jsPDF non disponible.");
+            return;
+          }
+          saveCurrentPage();
+
+          const total = pages.length;
+          const input = window.prompt(
+            `Pages à exporter (ex: "1,3-5") ou vide pour toutes (1-${total}) :`,
+            ""
+          );
+          if (input === null) return;
+          const indices = parsePageSelection(input, total);
+          if (indices.length === 0) {
+            alert("Aucune page valide sélectionnée.");
+            return;
+          }
+
+          const { jsPDF } = window.jspdf;
+          const doc = new jsPDF({ orientation: "p", unit: "mm", format: "a4" });
+
+          indices.forEach((idx, idxPos) => {
+            const pageCanvas = pages[idx] || makeBlankCanvas();
+            const tmp = document.createElement("canvas");
+            tmp.width = pageCanvas.width;
+            tmp.height = pageCanvas.height;
+            renderPageToCanvas(idx, tmp);
+            const imgData = tmp.toDataURL("image/jpeg", 0.95);
+
+            const pageWidth = doc.internal.pageSize.getWidth();
+            const pageHeight = doc.internal.pageSize.getHeight();
+            const imgAspect = tmp.width / tmp.height;
+            const pageAspect = pageWidth / pageHeight;
+
+            let drawWidth, drawHeight;
+            if (imgAspect > pageAspect) {
+              drawWidth = pageWidth;
+              drawHeight = pageWidth / imgAspect;
+            } else {
+              drawHeight = pageHeight;
+              drawWidth = pageHeight * imgAspect;
+            }
+            const x = (pageWidth - drawWidth) / 2;
+            const y = (pageHeight - drawHeight) / 2;
+
+            doc.addImage(imgData, "JPEG", x, y, drawWidth, drawHeight);
+            if (idxPos < indices.length - 1) {
+              doc.addPage();
+            }
+          });
+
+          doc.save("tableau_blanc_pages.pdf");
+        }
+
+        // --- Vue ---
+        function zoomBy(factor) {
+          if (!canvasRef.current) return;
+          const cont = canvasRef.current;
+          const rect = cont.getBoundingClientRect();
+          const center = {
+            x: (rect.width * (window.devicePixelRatio || 1)) / 2,
+            y: (rect.height * (window.devicePixelRatio || 1)) / 2,
+          };
+          const prev = viewRef.current.scale;
+          const next = Math.min(4, Math.max(0.2, prev * factor));
+          const { tx, ty, scale } = viewRef.current;
+          const wx = (center.x - tx) / scale;
+          const wy = (center.y - ty) / scale;
+          viewRef.current.scale = next;
+          viewRef.current.tx = center.x - wx * next;
+          viewRef.current.ty = center.y - wy * next;
+          drawAll();
+        }
+
+        function resetView() {
+          viewRef.current = { tx: 0, ty: 0, scale: 1 };
+          drawAll();
+        }
+
+        function fitToPage(pageCnv, angle) {
+          if (!canvasRef.current) return;
+          const c = canvasRef.current;
+          const vw = c.width;
+          const vh = c.height;
+          const pw = pageCnv.width;
+          const ph = pageCnv.height;
+
+          const a = angle || 0;
+          const k = Math.round(a / (Math.PI / 2)) % 2; // 0 pour 0/180°, 1 pour 90/270°
+          const effW = k === 0 ? pw : ph;
+          const effH = k === 0 ? ph : pw;
+
+          const s = Math.min(vw / effW, vh / effH) * 0.95;
+          viewRef.current.scale = s;
+          viewRef.current.tx = (vw - effW * s) / 2;
+          viewRef.current.ty = (vh - effH * s) / 2;
+          drawAll();
+        }
+
+        function deleteActive() {
+          if (!activeOverlayId) return;
+          setOverlays((prev) => prev.filter((o) => o.id !== activeOverlayId));
+          setActiveOverlayId(null);
+          setActivePart(null);
+          drawAll();
+        }
+
+        // --- Effets init + resize + clavier ---
+        useEffect(() => {
+          const canvas = canvasRef.current;
+          const overlay = overlayRef.current;
+          const cont = containerRef.current;
+          const resize = () => {
+            if (!canvas || !overlay || !cont) return;
+            const dpr = window.devicePixelRatio || 1;
+            const rect = cont.getBoundingClientRect();
+            const width = rect.width;
+            const height = rect.height;
+            [canvas, overlay].forEach((c) => {
+              c.width = Math.floor(width * dpr);
+              c.height = Math.floor(height * dpr);
+              c.style.width = width + "px";
+              c.style.height = height + "px";
+            });
+            drawAll();
+          };
+          resize();
+          const obs = new ResizeObserver(resize);
+          obs.observe(cont);
+
+          function onKey(e) {
+            const meta = e.ctrlKey || e.metaKey;
+            if (meta && e.key.toLowerCase() === "z") {
+              e.preventDefault();
+              if (e.shiftKey) redo();
+              else undo();
+            }
+            if (meta && e.key.toLowerCase() === "y") {
+              e.preventDefault();
+              redo();
+            }
+            if (activeOverlayId && e.key === "Delete") {
+              e.preventDefault();
+              deleteActive();
+            }
+          }
+          window.addEventListener("keydown", onKey);
+
+          // page blanche initiale
+          addBlankPage();
+
+          return () => {
+            obs.disconnect();
+            window.removeEventListener("keydown", onKey);
+          };
+          // eslint-disable-next-line
+        }, []);
+
+        useEffect(() => {
+          drawAll();
+        }, [
+          strokes,
+          shapes,
+          overlays,
+          tool,
+          color,
+          size,
+          isDrawing,
+          currentPoints,
+          shapeStart,
+          pages,
+          pageIndex,
+          pageAngles,
+          pageBgs,
+        ]);
+
+        // --- Rendu JSX ---
+        return (
+          <div className="app-container">
+            {/* Toolbar */}
+            <div className="toolbar">
+              <button
+                className={"chip" + (tool === "hand" ? " active" : "")}
+                onClick={() => setTool("hand")}
+              >
+                Main
+              </button>
+              <button
+                className={"chip" + (tool === "move" ? " active" : "")}
+                onClick={() => setTool("move")}
+              >
+                Déplacer objets
+              </button>
+              <div className="sep" />
+              <button
+                className={"chip" + (tool === "pen" ? " active" : "")}
+                onClick={() => setTool("pen")}
+              >
+                Crayon
+              </button>
+              <button
+                className={"chip" + (tool === "highlighter" ? " active" : "")}
+                onClick={() => setTool("highlighter")}
+              >
+                Surligneur
+              </button>
+              <button
+                className={"chip" + (tool === "eraser" ? " active" : "")}
+                onClick={() => setTool("eraser")}
+              >
+                Gomme
+              </button>
+              <div className="sep" />
+              <label className="label">
+                Couleur
+                <input
+                  type="color"
+                  value={color}
+                  onChange={(e) => setColor(e.target.value)}
+                />
+              </label>
+              <label className="label">
+                Épaisseur
+                <input
+                  type="range"
+                  min={1}
+                  max={40}
+                  value={size}
+                  onChange={(e) => setSize(parseInt(e.target.value, 10))}
+                />
+                <span style={{ width: 24, textAlign: "right" }}>{size}</span>
+              </label>
+              <div className="sep" />
+              <button className="btn" onClick={undo}>
+                ⟲ Annuler
+              </button>
+              <button className="btn" onClick={redo}>
+                ⟳ Rétablir
+              </button>
+              <button className="btn" onClick={clearAll}>
+                Tout effacer
+              </button>
+              <button className="btn-green" onClick={exportPNG}>
+                Exporter PNG (page)
+              </button>
+              <button className="btn-primary" onClick={exportPDF}>
+                Exporter PDF (pages)
+              </button>
+              <div className="sep" />
+              <label className="label">
+                Fond
+                <select
+                  value={currentBg}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    setPageBgs((prev) => {
+                      const len = pages ? pages.length : Math.max(prev.length, pageIndex + 1);
+                      const arr = prev.slice();
+                      while (arr.length < len) arr.push("plain");
+                      arr[pageIndex] = val;
+                      return arr;
+                    });
+                  }}
+                >
+                  <option value="plain">Parchemin</option>
+                  <option value="grid">Quadrillé</option>
+                  <option value="lined">Ligné</option>
+                </select>
+              </label>
+              <div className="sep" />
+              <button className="btn" onClick={() => zoomBy(1 / 1.2)}>
+                − Zoom
+              </button>
+              <button className="btn" onClick={() => zoomBy(1.2)}>
+                + Zoom
+              </button>
+              <button className="btn" onClick={resetView}>
+                Réinitialiser vue
+              </button>
+            </div>
+
+            {/* Panel outils */}
+            <ToolsPanel
+              tool={tool}
+              setTool={setTool}
+              onAddTable={addTable}
+              onImportFile={(file) => {
+                if (!file) return;
+                if (file.type === "application/pdf") importPDF(file);
+                else addImageFile(file);
+              }}
+              onImportURL={importFromURL}
+              hasPages={!!pages}
+              page={pageIndex + 1}
+              total={pages ? pages.length : 0}
+              onPrev={goPrev}
+              onNext={goNext}
+              onFit={() => {
+                if (pages && pages[pageIndex])
+                  fitToPage(pages[pageIndex], pageAngles[pageIndex] || 0);
+              }}
+              onAddBlankPage={addBlankPage}
+              onRotateLeft={() => rotatePageDegrees(-90)}
+              onRotateRight={() => rotatePageDegrees(90)}
+            />
+
+            {/* Zone de dessin */}
+            <div ref={containerRef} className="canvas-wrapper">
+              <canvas
+                ref={canvasRef}
+                className="canvas-base"
+                onWheel={onWheel}
+                onMouseDown={onDown}
+                onMouseMove={onMove}
+                onMouseUp={onUp}
+                onMouseLeave={onUp}
+                onDoubleClick={onDoubleClick}
+              />
+              <canvas ref={overlayRef} className="canvas-overlay" />
+
+              {editingCell && (
+                <textarea
+                  autoFocus
+                  value={editingCell.value}
+                  onChange={(e) =>
+                    setEditingCell((prev) =>
+                      prev ? { ...prev, value: e.target.value } : prev
+                    )
+                  }
+                  onBlur={() => commitEditingCell(false)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      commitEditingCell(false);
+                    } else if (e.key === "Escape") {
+                      e.preventDefault();
+                      commitEditingCell(true);
+                    }
+                  }}
+                  style={{
+                    position: "absolute",
+                    left: editingCell.left + "px",
+                    top: editingCell.top + "px",
+                    width: editingCell.width + "px",
+                    height: editingCell.height + "px",
+                    padding: "4px",
+                    fontSize: "14px",
+                    borderRadius: "4px",
+                    border: "1px solid #bf9e6f",
+                    background: "rgba(255,255,255,0.95)",
+                    resize: "none",
+                    outline: "none",
+                  }}
+                />
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      function ToolsPanel({
+        tool,
+        setTool,
+        onAddTable,
+        onImportFile,
+        onImportURL,
+        hasPages,
+        page,
+        total,
+        onPrev,
+        onNext,
+        onFit,
+        onAddBlankPage,
+        onRotateLeft,
+        onRotateRight,
+      }) {
+        const fileRef = useRef(null);
+        const [rows, setRows] = useState(3);
+        const [cols, setCols] = useState(4);
+        const [url, setUrl] = useState("");
+
+        return (
+          <div className="panel">
+            <div className="panel-section">
+              <span className="label" style={{ fontWeight: 600 }}>
+                Formes
+              </span>
+              <button
+                className={"chip" + (tool === "line" ? " active" : "")}
+                onClick={() => setTool("line")}
+              >
+                Ligne
+              </button>
+              <button
+                className={"chip" + (tool === "rect" ? " active" : "")}
+                onClick={() => setTool("rect")}
+              >
+                Rect
+              </button>
+              <button
+                className={"chip" + (tool === "ellipse" ? " active" : "")}
+                onClick={() => setTool("ellipse")}
+              >
+                Ellipse
+              </button>
+              <button
+                className={"chip" + (tool === "arrow" ? " active" : "")}
+                onClick={() => setTool("arrow")}
+              >
+                Flèche
+              </button>
+            </div>
+
+            <div className="panel-section">
+              <span className="label" style={{ fontWeight: 600 }}>
+                Imports
+              </span>
+              <input
+                type="file"
+                ref={fileRef}
+                accept="image/*,application/pdf"
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0] || null;
+                  onImportFile(f);
+                  e.target.value = "";
+                }}
+              />
+              <button
+                className="big-btn big-btn-primary"
+                onClick={() => fileRef.current && fileRef.current.click()}
+              >
+                Importer (Image/PDF)
+              </button>
+              <input
+                className="url-input"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                placeholder="URL image ou PDF"
+              />
+              <button
+                className="big-btn big-btn-primary"
+                onClick={() => url && onImportURL(url)}
+              >
+                Importer URL
+              </button>
+            </div>
+
+            <div className="panel-section">
+              <span className="label" style={{ fontWeight: 600 }}>
+                Tableau de données
+              </span>
+              <label className="label">
+                lignes
+                <input
+                  type="number"
+                  min={1}
+                  max={30}
+                  value={rows}
+                  onChange={(e) =>
+                    setRows(parseInt(e.target.value, 10) || 1)
+                  }
+                  style={{ width: 60 }}
+                />
+              </label>
+              <label className="label">
+                colonnes
+                <input
+                  type="number"
+                  min={1}
+                  max={30}
+                  value={cols}
+                  onChange={(e) =>
+                    setCols(parseInt(e.target.value, 10) || 1)
+                  }
+                  style={{ width: 60 }}
+                />
+              </label>
+              <button
+                className="big-btn big-btn-primary"
+                onClick={() => onAddTable(rows, cols)}
+              >
+                Insérer tableau
+              </button>
+            </div>
+
+            <div className="panel-section">
+              <span className="label" style={{ fontWeight: 600 }}>
+                Pages
+              </span>
+              {hasPages ? (
+                <>
+                  <button className="big-btn" onClick={onPrev}>
+                    ◀
+                  </button>
+                  <span className="page-info">
+                    Page {page}/{total}
+                  </span>
+                  <button className="big-btn" onClick={onNext}>
+                    ▶
+                  </button>
+                  <button className="big-btn" onClick={onFit}>
+                    Ajuster
+                  </button>
+                  <button className="big-btn" onClick={onRotateLeft}>
+                    ⟲
+                  </button>
+                  <button className="big-btn" onClick={onRotateRight}>
+                    ⟳
+                  </button>
+                  <button
+                    className="big-btn big-btn-primary"
+                    onClick={onAddBlankPage}
+                  >
+                    + Page vierge
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    className="big-btn big-btn-primary"
+                    onClick={onAddBlankPage}
+                  >
+                    + Page vierge
+                  </button>
+                  <span className="hint">Aucune page importée</span>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById("root"));
+      root.render(<TableauBlancMagique />);
+    </script>
+  </body>
+</html>
